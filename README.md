@@ -42,7 +42,7 @@ ollama serve
 ### 4. Pull the Model (First Time)
 In another terminal:
 ```bash
-ollama pull qwen2.5:27b
+ollama pull qwen3:8b
 ```
 Note: You can use other models like `qwen2.5:7b`, `mistral:7b`, or `qwen3:8b` depending on your hardware
 
