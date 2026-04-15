@@ -36,7 +36,7 @@ ollama serve
 ### 4. Pull the Model (First Time)
 In another terminal:
 ```bash
-ollama pull qwen2.5:27b
+ollama pull qwen3:8b
 ```
 
 ## Setup
