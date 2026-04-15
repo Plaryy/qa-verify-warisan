@@ -3,9 +3,7 @@
 # You can easily swap prompts by changing file references
 
 prompts:
-  paraphrase: paraphrase.txt
-  language_fix: language_fix.txt
-  hallucination_check: hallucination_check.txt
+  unified_cleaner: unified_qa_cleaner.txt
 
 # Prompt metadata (optional)
 metadata:

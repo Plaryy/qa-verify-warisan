@@ -1,89 +1,52 @@
 #!/usr/bin/env python3
 """
-QA Data Cleaner and Validator
-Processes Q&A datasets to detect hallucination, mixed languages, noise, and improve answer quality.
-Uses Ollama with Qwen 2.5 27B for LLM operations.
-Implements SSUN (Semantic Similarity Understanding Network) for hallucination detection.
-Based on: "LLM-Based QA from Structured Bibliographic Data via Semantic Similarity Understanding Network"
+QA Data Cleaner and Validator - Unified Prompt Version
+Uses a single unified Ollama prompt for all validation and cleaning tasks.
+Processes Q&A datasets to detect and fix issues in answers.
 """
 
 import csv
-import re
 import argparse
 import sys
 import requests
 from pathlib import Path
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List
 from dataclasses import dataclass
-from collections import Counter
-from difflib import SequenceMatcher
 
-import numpy as np
 import pandas as pd
-from sentence_transformers import SentenceTransformer, util
-
 from prompt_manager import PromptManager
-
-# Configuration
-MIN_ANSWER_LENGTH = 20  # Minimum character length for answer
-SIMILARITY_THRESHOLD = 0.5  # Threshold for hallucination detection
-NOISE_THRESHOLD = 0.3  # Threshold for noise detection (% of non-alphanumeric chars)
-
-# Distinctive language markers for BM and Indonesian.
-# These are intentionally domain-agnostic so detection works across diverse topics.
-BM_MARKERS = {
-    'ialah', 'boleh', 'kerana', 'sahaja', 'sekiranya', 'walaupun',
-    'manakala', 'berkenaan', 'mesti', 'daripada'
-}
-
-INDONESIAN_MARKERS = {
-    'adalah', 'bisa', 'karena', 'saja', 'jika', 'meskipun',
-    'sedangkan', 'terkait', 'harus', 'dari'
-}
 
 
 @dataclass
 class QARecord:
-    """Represents a single QA record with metadata."""
+    """Represents a single QA record with validation results."""
     question: str
     answer: str
     chunk: str
     similarity_score: float = 0.0
     has_mixed_language: bool = False
-    mixed_language_details: str = ""
     has_noise: bool = False
     noise_percentage: float = 0.0
     is_too_short: bool = False
-    paraphrased_answer: str = ""
     cleaned_answer: str = ""
 
 
 class QAValidator:
-    """Validates and cleans QA data using SSUN-based semantic similarity."""
+    """Validates and cleans QA data using a unified Ollama prompt."""
 
-    def __init__(self, prompts_dir: str = "prompts", ollama_host: str = "http://localhost:11434", model: str = "qwen2.5:27b"):
+    def __init__(self, prompts_dir: str = "prompts", ollama_host: str = "http://localhost:11434", model: str = "qwen3:8b"):
         """
-        Initialize validator with Ollama client, prompt manager, and semantic encoder.
+        Initialize validator with Ollama client and unified prompt.
 
         Args:
-            prompts_dir: Directory containing prompt files and config
-            ollama_host: Ollama server URL (default: localhost:11434)
-            model: Ollama model name (default: qwen2.5:27b)
+            prompts_dir: Directory containing prompt files
+            ollama_host: Ollama server URL
+            model: Ollama model name
         """
         self.ollama_host = ollama_host
         self.model = model
         self.prompt_manager = PromptManager(prompts_dir=prompts_dir)
         self.results: List[QARecord] = []
-
-        # Initialize Sentence Transformer for semantic similarity (SSUN algorithm)
-        print("Loading Sentence Transformer for semantic similarity...")
-        try:
-            self.semantic_encoder = SentenceTransformer('all-MiniLM-L6-v2')
-            print("Semantic encoder loaded successfully")
-        except Exception as e:
-            print(f"Warning: Could not load semantic encoder: {e}", file=sys.stderr)
-            print("Will use fallback similarity method", file=sys.stderr)
-            self.semantic_encoder = None
 
         # Verify Ollama connection
         self._verify_ollama_connection()
@@ -94,7 +57,6 @@ class QAValidator:
             response = requests.get(f"{self.ollama_host}/api/tags", timeout=5)
             if response.status_code == 200:
                 print(f"Connected to Ollama at {self.ollama_host}")
-                # List available models
                 models = response.json().get('models', [])
                 model_names = [m.get('name') for m in models]
                 print(f"Available models: {model_names}")
@@ -112,275 +74,141 @@ class QAValidator:
             print(f"Error connecting to Ollama: {e}")
             sys.exit(1)
 
-    def detect_hallucination(self, question: str, answer: str, chunk: str) -> float:
-        """
-        Detect hallucination using SSUN (Semantic Similarity Understanding Network) algorithm.
+    def _parse_ollama_response(self, response_text: str) -> Dict:
+        """Parse the key:value response from Ollama."""
+        result = {}
 
-        Compares answer with chunk using semantic similarity (cosine similarity of embeddings).
-        This is more robust than string-based similarity as it captures semantic meaning.
-
-        Based on: "LLM-Based QA from Structured Bibliographic Data via Semantic Similarity Understanding Network"
-
-        Returns:
-            Similarity score between 0 and 1 (higher = more likely hallucinated)
-        """
-        if self.semantic_encoder is not None:
-            # SSUN Method: Sentence Transformer + Cosine Similarity
-            try:
-                # Step 1: Semantic Encoding - Create embeddings for answer and chunk
-                answer_embedding = self.semantic_encoder.encode(answer, convert_to_tensor=True)
-                chunk_embedding = self.semantic_encoder.encode(chunk, convert_to_tensor=True)
-
-                # Step 2: Semantic Similarity Calculation - Cosine similarity
-                # Returns similarity in range [0, 1]
-                semantic_similarity = util.pytorch_cos_sim(answer_embedding, chunk_embedding).item()
-
-                # Higher semantic_similarity = answer is similar to chunk = NOT hallucinated
-                # We want to return hallucination risk, so invert it
-                hallucination_risk = 1.0 - semantic_similarity
-
-                return max(0.0, min(1.0, hallucination_risk))
-
-            except Exception as e:
-                print(f"Error in SSUN semantic similarity: {e}", file=sys.stderr)
-                # Fall back to basic similarity
-                return self._fallback_similarity(question, answer, chunk)
-        else:
-            # Fallback if semantic encoder not available
-            return self._fallback_similarity(question, answer, chunk)
-
-    def _fallback_similarity(self, question: str, answer: str, chunk: str) -> float:
-        """
-        Fallback similarity method using SequenceMatcher (basic string similarity).
-        Used when semantic encoder is not available.
-
-        Returns:
-            Similarity score between 0 and 1
-        """
-        answer_clean = answer.lower()
-        chunk_clean = chunk.lower()
-        question_clean = question.lower()
-
-        # Calculate similarity between answer and chunk using SequenceMatcher
-        string_similarity = SequenceMatcher(None, answer_clean, chunk_clean).ratio()
-
-        # Also check phrase overlap
-        chunk_phrases = set(chunk_clean.split())
-        answer_phrases = set(answer_clean.split())
-        overlap = len(chunk_phrases & answer_phrases) / max(len(answer_phrases), 1)
-
-        # Combined: 40% string similarity + 60% overlap
-        combined_score = (string_similarity * 0.4) + (overlap * 0.6)
-
-        # Invert to get hallucination risk (similarity = not hallucinated)
-        hallucination_risk = 1.0 - combined_score
-
-        return max(0.0, min(1.0, hallucination_risk))
-
-    def check_answer_length(self, answer: str) -> bool:
-        """Check if answer is below minimum threshold."""
-        return len(answer.strip()) < MIN_ANSWER_LENGTH
-
-    def detect_noise(self, text: str) -> Tuple[bool, float]:
-        """
-        Detect noise in text (random characters, excessive punctuation, etc).
-        Returns (has_noise, noise_percentage).
-        """
-        if not text:
-            return False, 0.0
-
-        # Count non-alphanumeric characters
-        non_alphanum = sum(1 for c in text if not c.isalnum() and c.isascii() and c not in ' ')
-        total_chars = len(text)
-
-        noise_ratio = non_alphanum / total_chars if total_chars > 0 else 0
-
-        # Check for repeated characters (noise indicator)
-        repeated_chars = len(re.findall(r'(.)\1{3,}', text))  # 4+ consecutive same chars
-        repeated_ratio = repeated_chars / max(total_chars, 1)
-
-        combined_noise = (noise_ratio * 0.6) + (repeated_ratio * 0.4)
-
-        has_noise = combined_noise > NOISE_THRESHOLD
-
-        return has_noise, combined_noise
-
-    def detect_mixed_language(self, text: str) -> Tuple[bool, str]:
-        """
-        Detect if text appears to mix Bahasa Malaysia and Indonesian.
-        Returns (has_mixed_language, details_string).
-        """
-        text_lower = text.lower()
-        words = re.findall(r'\b\w+\b', text_lower)
-
-        if len(words) < 5:
-            return False, "Text too short for language detection"
-
-        bm_score = sum(1 for word in words if word in BM_MARKERS)
-        indo_score = sum(1 for word in words if word in INDONESIAN_MARKERS)
-        total_markers = bm_score + indo_score
-
-        if total_markers < 3:
-            return False, f"Insufficient language markers (BM: {bm_score}, Indonesian: {indo_score})"
-
-        bm_ratio = bm_score / total_markers
-        indo_ratio = indo_score / total_markers
-        has_mixed = (
-            bm_score >= 1 and
-            indo_score >= 1 and
-            bm_ratio >= 0.2 and
-            indo_ratio >= 0.2
-        )
-
-        details = (
-            f"BM markers: {bm_score}, Indonesian markers: {indo_score}, "
-            f"BM ratio: {bm_ratio:.2f}, Indonesian ratio: {indo_ratio:.2f}"
-        )
-
-        return has_mixed, details
-
-    def paraphrase_short_answer(self, question: str, answer: str, chunk: str) -> str:
-        """
-        Use Ollama to paraphrase a short answer using information from the chunk.
-        """
         try:
-            prompt = self.prompt_manager.format_prompt(
-                'paraphrase',
-                question=question,
-                answer=answer,
-                chunk=chunk
-            )
-
-            response = requests.post(
-                f"{self.ollama_host}/api/generate",
-                json={
-                    "model": self.model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "temperature": 0.7,
-                },
-                timeout=300
-            )
-
-            if response.status_code == 200:
-                result = response.json()
-                return result.get('response', '').strip()
-            else:
-                print(f"Ollama error: {response.status_code}", file=sys.stderr)
-                return answer
-        except requests.exceptions.Timeout:
-            print(f"Error: Request to Ollama timed out", file=sys.stderr)
-            return answer
+            lines = response_text.strip().split('\n')
+            for line in lines:
+                line = line.strip()
+                if ':' in line:
+                    key, value = line.split(':', 1)
+                    key = key.strip()
+                    value = value.strip()
+                    result[key] = value
         except Exception as e:
-            print(f"Error in paraphrasing: {e}", file=sys.stderr)
-            return answer
+            print(f"Parse error: {e}", file=sys.stderr)
 
-    def check_and_fix_language_mix(self, text: str, question: str, chunk: str) -> str:
-        """
-        Use Ollama to identify and fix mixed language issues.
-        """
-        try:
-            # Truncate very long texts to avoid token limits
-            question = question[:500]
-            chunk = chunk[:500]
-            text = text[:500]
-
-            prompt = self.prompt_manager.format_prompt(
-                'language_fix',
-                text=text,
-                question=question,
-                chunk=chunk
-            )
-
-            response = requests.post(
-                f"{self.ollama_host}/api/generate",
-                json={
-                    "model": self.model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "temperature": 0.7,
-                },
-                timeout=300
-            )
-
-            if response.status_code == 200:
-                result = response.json()
-                fixed_text = result.get('response', '').strip()
-                return fixed_text if fixed_text else text
-            else:
-                print(f"Ollama error: {response.status_code}", file=sys.stderr)
-                return text
-        except requests.exceptions.Timeout:
-            print(f"Error: Request to Ollama timed out", file=sys.stderr)
-            return text
-        except Exception as e:
-            print(f"Error in language fixing: {e}", file=sys.stderr)
-            return text
-
-    def clean_noise(self, text: str) -> str:
-        """Basic noise cleaning (remove excessive punctuation, fix repeated chars)."""
-        # Remove multiple consecutive spaces
-        text = re.sub(r'\s+', ' ', text)
-
-        # Fix excessive punctuation
-        text = re.sub(r'([!?.]){3,}', r'\1', text)
-
-        # Fix repeated characters (but preserve intentional ones like "aaa")
-        text = re.sub(r'([a-zA-Z])\1{4,}', r'\1\1', text)
-
-        return text.strip()
+        # Fallback: return empty dict with defaults
+        return result if result else {"STATUS": "error", "CLEANED_ANSWER": ""}
 
     def process_record(self, question: str, answer: str, chunk: str) -> QARecord:
-        """Process a single QA record through all validation steps."""
+        """Process a single QA record with unified prompt."""
         record = QARecord(
             question=question,
             answer=answer,
             chunk=chunk
         )
 
-        # 1. Detect hallucination
-        record.similarity_score = self.detect_hallucination(question, answer, chunk)
+        try:
+            # Compute word length of answer
+            word_length = len(answer.split())
 
-        # 2. Check noise
-        record.has_noise, record.noise_percentage = self.detect_noise(answer)
-        record.cleaned_answer = self.clean_noise(answer) if record.has_noise else answer
-
-        # 3. Check answer length
-        record.is_too_short = self.check_answer_length(record.cleaned_answer)
-
-        # 4. Paraphrase if too short
-        if record.is_too_short:
-            record.paraphrased_answer = self.paraphrase_short_answer(
-                question, record.cleaned_answer, chunk
+            # Call unified prompt to Ollama
+            prompt = self.prompt_manager.format_prompt(
+                'unified_cleaner',
+                question=question,
+                answer=answer,
+                chunk=chunk,
+                length=word_length
             )
-            record.cleaned_answer = record.paraphrased_answer
 
-        # 5. Detect mixed language
-        record.has_mixed_language, record.mixed_language_details = self.detect_mixed_language(
-            record.cleaned_answer
-        )
-
-        # 6. Fix language mix if detected
-        if record.has_mixed_language:
-            record.cleaned_answer = self.check_and_fix_language_mix(
-                record.cleaned_answer,
-                question,
-                chunk
+            response = requests.post(
+                f"{self.ollama_host}/api/generate",
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "temperature": 0.7,
+                },
+                timeout=300
             )
+
+            if response.status_code == 200:
+                result = response.json()
+                response_text = result.get('response', '').strip()
+
+                # Parse key:value response
+                parsed = self._parse_ollama_response(response_text)
+
+                # Extract values safely
+                status = parsed.get('STATUS', 'error')
+                answer_cleaned = parsed.get('CLEANED_ANSWER', answer)
+
+                # Set similarity score based on status
+                if status == 'accept':
+                    record.similarity_score = 0.0
+                elif status == 'edit':
+                    record.similarity_score = 0.3
+                else:
+                    record.similarity_score = 0.9
+
+                record.has_noise = False
+                record.noise_percentage = 0.0
+                record.is_too_short = False
+                record.has_mixed_language = False
+                record.cleaned_answer = str(answer_cleaned).strip() if answer_cleaned else answer
+
+            else:
+                print(f"Ollama error: {response.status_code}", file=sys.stderr)
+                record.cleaned_answer = answer
+
+        except requests.exceptions.Timeout:
+            print(f"Error: Request to Ollama timed out for record", file=sys.stderr)
+            record.cleaned_answer = answer
+        except Exception as e:
+            print(f"Error processing record: {e}", file=sys.stderr)
+            record.cleaned_answer = answer
 
         self.results.append(record)
         return record
 
     def process_csv(self, input_path: str) -> List[QARecord]:
         """Process entire CSV file."""
-        df = pd.read_csv(input_path)
+        # Try common delimiters in order
+        delimiters = [',', '\t', ';', '|']
+        df = None
 
-        # Validate required columns
-        required_cols = ['soalan', 'jawapan', 'potongan teks']
-        missing_cols = [col for col in required_cols if col not in df.columns]
+        for delimiter in delimiters:
+            try:
+                df = pd.read_csv(input_path, delimiter=delimiter, on_bad_lines='skip')
+                # Check if this delimiter worked by looking for our expected columns
+                df.columns = df.columns.str.lower().str.strip()
+                col_matches = sum(1 for col in df.columns if any(x in col for x in ['soalan', 'jawapan', 'potongan']))
+                if col_matches >= 2:  # Found at least 2 of our columns
+                    print(f"Using delimiter: {repr(delimiter)}")
+                    break
+                df = None
+            except:
+                df = None
+
+        if df is None:
+            raise ValueError(f"Could not parse CSV file with any common delimiter")
+
+        # Normalize column names
+        df.columns = df.columns.str.lower().str.strip()
+
+        # Debug: print actual column names
+        print(f"DEBUG: Detected columns: {list(df.columns)}", file=sys.stderr)
+
+        # Map variations of column names
+        col_mapping = {}
+        for col in df.columns:
+            col_clean = col.lower().strip().replace(' ', '_')
+            if 'soalan' in col_clean or 'question' in col_clean:
+                col_mapping['soalan'] = col
+            elif 'jawapan' in col_clean or 'answer' in col_clean:
+                col_mapping['jawapan'] = col
+            elif 'potongan' in col_clean or 'chunk' in col_clean or 'text' in col_clean:
+                col_mapping['potongan_teks'] = col
+
+        required_cols = ['soalan', 'jawapan', 'potongan_teks']
+        missing_cols = [col for col in required_cols if col not in col_mapping]
 
         if missing_cols:
-            raise ValueError(f"Missing required columns: {missing_cols}")
+            print(f"DEBUG: Column mapping found: {col_mapping}", file=sys.stderr)
+            raise ValueError(f"Missing required columns: {missing_cols}. Found: {list(df.columns)}")
 
         print(f"Processing {len(df)} records...")
 
@@ -389,9 +217,9 @@ class QAValidator:
                 print(f"  Progress: {idx + 1}/{len(df)}")
 
             self.process_record(
-                question=str(row['soalan']).strip(),
-                answer=str(row['jawapan']).strip(),
-                chunk=str(row['potongan teks']).strip()
+                question=str(row[col_mapping['soalan']]).strip(),
+                answer=str(row[col_mapping['jawapan']]).strip(),
+                chunk=str(row[col_mapping['potongan_teks']]).strip()
             )
 
         return self.results
@@ -410,8 +238,7 @@ class QAValidator:
                 'has_noise': record.has_noise,
                 'noise_percentage': round(record.noise_percentage, 3),
                 'is_too_short': record.is_too_short,
-                'has_mixed_language': record.has_mixed_language,
-                'language_details': record.mixed_language_details
+                'has_mixed_language': record.has_mixed_language
             })
 
         output_df = pd.DataFrame(data)
@@ -429,14 +256,13 @@ class QAValidator:
         print(f"Records with noise: {df['has_noise'].sum()} ({df['has_noise'].sum()/len(df)*100:.1f}%)")
         print(f"Records too short: {df['is_too_short'].sum()} ({df['is_too_short'].sum()/len(df)*100:.1f}%)")
         print(f"Records with mixed language: {df['has_mixed_language'].sum()} ({df['has_mixed_language'].sum()/len(df)*100:.1f}%)")
-        print(f"Average similarity score: {df['similarity_score'].mean():.3f}")
-        print(f"High hallucination risk (similarity > {SIMILARITY_THRESHOLD}): {(df['similarity_score'] > SIMILARITY_THRESHOLD).sum()} records")
+        print(f"Average hallucination risk: {df['similarity_score'].mean():.3f}")
 
 
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="QA Data Cleaner - Detects and fixes issues in Q&A datasets using Ollama"
+        description="QA Data Cleaner - Single unified prompt for all validations"
     )
     parser.add_argument(
         "input_file",
@@ -454,8 +280,8 @@ def main():
     )
     parser.add_argument(
         "-m", "--model",
-        help="Ollama model name (default: qwen2.5:27b)",
-        default="qwen2.5:27b"
+        help="Ollama model name (default: qwen3:8b)",
+        default="qwen3:8b"
     )
 
     args = parser.parse_args()

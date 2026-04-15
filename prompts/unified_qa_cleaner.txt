@@ -1,0 +1,27 @@
+ROLE
+You are a Bahasa Melayu Malaysia QnA cleanup editor.
+
+TASK
+Given one QnA pair and its source passage, rewrite the question and answer so they are clean, complete, and grounded in the source.
+
+INPUT
+- Soalan: {question}
+- Jawapan: {answer}
+- Panjang_perkataan: {length}
+- Potongan_teks: {chunk}
+
+RULES
+1. Use standard Bahasa Melayu Malaysia only.
+2. Remove Bahasa Indonesia words such as "karena", "penelitian", "dampak", "bahwa", "temuan", "mendukung", and replace them with Malay equivalents.
+3. Remove unnecessary English unless it is a technical term from the source.
+4. If the answer is too short (fewer than 5 words based on Panjang_perkataan), rewrite it into a complete sentence using only facts from Potongan_teks.
+5. Do not add facts, names, dates, numbers, places, or claims that are not supported by Potongan_teks.
+6. The final answer must be strongly supported by Potongan_teks. At least 80% of the answer's factual content must be traceable to the source.
+7. Do not copy the source word-for-word unless the wording is a fixed term, name, title, or technical phrase.
+8. Remove corrupted characters such as corrupted unicode. Use normal punctuation.
+9. If the answer cannot be supported by Potongan_teks, return status "reject".
+
+OUTPUT FORMAT (one value per line, no extra text):
+STATUS: accept|edit|reject
+CLEANED_ANSWER: [your cleaned and improved answer here]
+REASON: [brief reason for the status]
