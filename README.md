@@ -1,288 +1,206 @@
 # QA Data Cleaner & Validator
 
-A Python tool for validating and cleaning Q&A datasets by detecting hallucinations, mixed languages, noise, and improving answer quality using **Ollama with Qwen 2.5 27B** (local LLM).
+A Python tool for validating and cleaning Q&A datasets by detecting hallucinations, mixed languages, noise, and improving answer quality using **Ollama with Qwen 3 8B** (local LLM).
 
 ## Features
 
-1. **Semantic Hallucination Detection (SSUN Algorithm)** - Uses Sentence Transformers embeddings to detect semantic gaps between answers and reference chunks (not just string matching)
-2. **Answer Length Validation** - Identifies answers below minimum threshold and paraphrases them using Ollama LLM
-3. **Mixed Language Detection** - Detects and fixes mixed Bahasa Malaysia/Indonesian usage
-4. **Noise Detection** - Identifies random characters, excessive punctuation, and garbled text
-5. **Automatic Cleaning** - Uses Ollama unified prompts to paraphrase short answers and fix language issues
-6. **External Prompt Management** - Centralized prompt configuration via `prompts/config.yaml` for easy customization
-7. **Comprehensive Output** - Exports both original and cleaned versions for comparison
+1. **Semantic Hallucination Detection (SSUN Algorithm)** — Uses Sentence Transformers embeddings to detect semantic gaps between answers and reference chunks
+2. **Answer Length Validation** — Identifies answers below the minimum threshold and rewrites them using the LLM
+3. **Mixed Language Detection** — Detects and fixes improper Bahasa Malaysia / non-Malay mixing
+4. **Noise Detection** — Identifies random characters, excessive punctuation, and garbled text
+5. **Automatic Cleaning** — Single combined LLM prompt handles validation and cleaning in one pass
+6. **External Prompt Management** — Centralised prompt configuration via `prompts/config.yaml`
+7. **Parallel Processing** — ThreadPoolExecutor + batch embeddings for fast throughput on modern hardware
 
 ## Project Structure
 
-- **qa_cleaner.py** - Main QA validation and cleaning script
-- **prompt_manager.py** - Manages loading and caching of LLM prompts
-- **prompts/** - Configuration and prompt templates
-- **requirements.txt** - Python dependencies
-- **SSUN_ALGORITHM.md** - Technical details on semantic similarity detection
-- **PROMPTS_STRUCTURE.txt** - Guide for prompt file organization
-
-## Benefits of Local LLM (Ollama)
-✅ **No API Keys** - Works completely locally  
-✅ **Privacy** - Your data never leaves your computer  
-✅ **Cost-Free** - No per-token charges  
-✅ **Offline** - Works without internet  
-✅ **Fast** - Optimized for local hardware  
+```
+qa_cleaner.py          Main validation and cleaning script
+prompt_manager.py      Loads and caches LLM prompts
+prompts/
+  config.yaml          Maps prompt names to files
+  combined_cleaner.txt Combined validation + cleaning prompt (used by default)
+  validate_all.txt     Standalone validation prompt
+  unified_qa_cleaner.txt  Standalone cleaning prompt
+  examples/            Reference templates for customisation
+requirements.txt       Python dependencies
+```
 
 ## Installation
 
 ### 1. Install Ollama
-Download and install from: https://ollama.ai
+Download from https://ollama.ai and install.
 
-### 2. Install Python Dependencies
+### 2. Install Python dependencies
 ```bash
 pip install -r requirements.txt
 ```
-This includes:
-- `sentence-transformers` (for SSUN semantic similarity)
-- `pandas` (for CSV handling)
-- `pyyaml` (for prompt configuration)
-- `requests` (for Ollama API calls)
 
-### 3. Start Ollama
-```bash
-ollama serve
-```
-
-### 4. Pull the Model (First Time)
-In another terminal:
+### 3. Pull the model
 ```bash
 ollama pull qwen3:8b
 ```
-Note: You can use other models like `qwen2.5:7b`, `mistral:7b`, or `qwen3:8b` depending on your hardware
 
-## Setup
-
-### Before Running
-
-1. **Start Ollama** (in one terminal):
-   ```bash
-   ollama serve
-   ```
-
-2. **Configure Prompts** (optional):
-   - Edit `prompts/config.yaml` to customize prompt files
-   - Modify prompt files in `prompts/` folder for custom validation behavior
-   - See `PROMPTS_STRUCTURE.txt` for prompt file locations
-
-3. **Run the QA Cleaner** (in another terminal):
-   ```bash
-   python qa_cleaner.py your_data.csv -o output.csv
-   ```
-
-### How Prompts Work
-
-The tool uses a **Prompt Manager** system that centralizes all LLM prompts:
-- **config.yaml** - Lists which prompt files to use
-- **unified_qa_cleaner.txt** - Main prompt for all validation tasks
-- **examples/** - Reference prompt templates you can copy and customize
-
-## How It Works
-
-### SSUN Algorithm (Semantic Similarity)
-
-Instead of basic string matching, the tool uses **SSUN (Semantic Similarity Understanding Network)** to understand meaning:
-
+### 4. Run
+Ollama starts automatically on Windows. If it is not running, start it:
+```bash
+ollama serve
 ```
-1. Convert answer & chunk to semantic embeddings
-2. Calculate cosine similarity between embeddings  
-3. Return hallucination risk (inverse of similarity)
+If you see `bind: Only one usage of each socket address` it is already running — proceed directly to step 5.
+
+### 5. For maximum throughput, set parallel workers before starting Ollama (PowerShell)
+```powershell
+$env:OLLAMA_NUM_PARALLEL = "4"
+ollama serve
 ```
 
-**Example:**
-- Question: "What's equivalent to list() in Python?"
-- Answer: "You can use [] brackets"
-- Chunk: "Python lists use square brackets []"
-- **Result:** ✓ High semantic match (~95%), even though words differ
+## Usage
 
-This handles paraphrases, synonyms, and meaning-based matches that simple string comparison would miss.
+### Basic
+```bash
+python qa_cleaner.py input.csv
+```
 
-See [SSUN_ALGORITHM.md](SSUN_ALGORITHM.md) for technical details.
+### With options
+```bash
+python qa_cleaner.py input.csv -o cleaned.csv --workers 4 --model qwen3:8b
+```
 
-### Processing Steps
+### All flags
+| Flag | Default | Description |
+|------|---------|-------------|
+| `input_file` | — | Input CSV path (required) |
+| `-o / --output` | `<input>_cleaned.csv` | Output CSV path |
+| `-m / --model` | `qwen3:8b` | Ollama model name |
+| `--ollama-host` | `http://localhost:11434` | Ollama server URL |
+| `--workers` | `4` | Concurrent Ollama requests (match `OLLAMA_NUM_PARALLEL`) |
+| `--context-size` | `32768` | LLM context window in tokens |
+| `--debug` | off | Print raw LLM responses to stderr |
 
-1. **Load Prompts** - Loads unified validation prompt from `prompts/config.yaml`
-2. **Semantic Analysis** - Encodes answer + chunk to embeddings
-3. **Validation Checks** - Runs hallucination, noise, language, and length checks
-4. **LLM Cleaning** - Uses Ollama to fix issues (paraphrase, language fixes)
-5. **Export Results** - Saves cleaned data alongside original
+### Python API
+```python
+from qa_cleaner import QAValidator
+
+validator = QAValidator(
+    ollama_host="http://localhost:11434",
+    model="qwen3:8b",
+    workers=4,
+    context_size=32768,
+)
+
+results = validator.process_csv("input.csv")
+validator.export_results("output.csv")
+
+for r in results:
+    print(f"Grounding score: {r.similarity_score:.2f}")  # 1.0 = fully grounded
+    print(f"Has noise:       {r.has_noise}")
+    print(f"Cleaned answer:  {r.cleaned_answer}")
+```
 
 ## Input CSV Format
 
 | Column | Description |
 |--------|-------------|
 | `soalan` | Question in Bahasa Malaysia |
-| `jawapan` | Answer/Response |
-| `potongan teks` | Reference chunk/text segment |
+| `jawapan` | Answer / response |
+| `potongan_teks` | Reference source chunk |
 
-### Example:
-```csv
-soalan,jawapan,potongan teks
-"Apa itu Python?","Python adalah bahasa programming","Python adalah bahasa pemrograman tingkat tinggi..."
+Column names are matched flexibly (case-insensitive, partial match).
+
+## Output CSV Format
+
+| Column | Description |
+|--------|-------------|
+| `soalan` | Original question |
+| `jawapan_original` | Original answer |
+| `jawapan_cleaned` | Cleaned / improved answer |
+| `potongan_teks` | Source chunk |
+| `similarity_score` | SSUN grounding score (see below) |
+| `has_noise` | Noise detected |
+| `noise_percentage` | Fraction of answer that is noise |
+| `is_too_short` | Answer below 10-word threshold |
+| `has_mixed_language` | Improper language mixing detected |
+
+## How It Works
+
+### SSUN Grounding Score
+
+The `similarity_score` column measures how well the answer is **grounded in the source chunk** on a `0.0 – 1.0` scale.
+
+| Score | Meaning |
+|-------|---------|
+| `0.85 – 1.00` | Strongly grounded — answer is semantically consistent with the chunk |
+| `0.65 – 0.84` | Well grounded — minor divergence, likely safe |
+| `0.45 – 0.64` | Moderate — answer may paraphrase beyond what the chunk supports |
+| `0.00 – 0.44` | Weakly grounded — answer is likely hallucinated or off-topic |
+
+> **Note for this dataset:** Chunks are 4000–8000 words and answers are 20–50 words. The chunk-size adjustment factor (≈ 0.64–0.70) is applied automatically, so expected grounding scores for valid answers typically fall in the **0.45–0.70** range. Scores below **0.35** are a meaningful red flag.
+
+**Algorithm steps:**
+
+```
+1. Encode all answers and chunks as 384-dim embeddings (batched, GPU-accelerated)
+2. Compute cosine similarity for each answer–chunk pair
+3. Apply chunk-size adjustment factor:
+      factor = 1 / (1 + log10(chunk_words / answer_words) × 0.1)   clamped [0.5, 1.0]
+4. grounding_score = raw_cosine_similarity × factor
 ```
 
-## Usage
+The chunk-size adjustment compensates for embedding dilution in large chunks — without it, a 5000-word chunk would appear superficially similar to almost any answer.
 
-### Basic Usage
-```bash
-python qa_cleaner.py sample_data.csv
+### Processing Pipeline
+
 ```
-
-### With Custom Output
-```bash
-python qa_cleaner.py sample_data.csv -o cleaned_results.csv
+Input CSV
+  │
+  ├─ Batch-encode all answers + chunks (single GPU pass)
+  ├─ Compute all grounding scores at once
+  │
+  └─ ThreadPoolExecutor (N workers)
+       └─ Per record: one combined Ollama call
+            → validation flags (noise, length, language)
+            → cleaned answer
+  │
+Output CSV
 ```
-
-### With Custom Model
-```bash
-python qa_cleaner.py sample_data.csv -m mistral:7b
-```
-
-### With Remote Ollama Server
-```bash
-python qa_cleaner.py sample_data.csv --ollama-host http://192.168.1.50:11434
-```
-
-### With Custom Prompts Directory
-```bash
-python qa_cleaner.py sample_data.csv --prompts-dir ./custom_prompts
-```
-
-### Full Example
-```bash
-python qa_cleaner.py data.csv -o results.csv --ollama-host http://localhost:11434 -m qwen2.5:27b
-```
-
-### Python API Usage
-```python
-from qa_cleaner import QAValidator
-
-# Initialize with custom settings
-validator = QAValidator(
-    prompts_dir="prompts",
-    ollama_host="http://localhost:11434",
-    model="qwen2.5:27b"
-)
-
-# Process single record
-record = validator.process_record(
-    question="Sample question",
-    answer="Sample answer",
-    chunk="Reference chunk"
-)
-
-# Access results
-print(f"Hallucination Risk: {record.similarity_score:.2%}")
-print(f"Has Noise: {record.has_noise}")
-print(f"Cleaned Answer: {record.cleaned_answer}")
-
-# Process CSV file
-results = validator.process_csv("data.csv")
-validator.export_results("output.csv")
-```
-
-### Full Help
-```bash
-python qa_cleaner.py --help
-```
-
-## Prompt Management System
-
-### Overview
-
-The tool uses a centralized **Prompt Manager** (`prompt_manager.py`) to load and manage all LLM prompts from external files. This makes it easy to customize validation behavior without changing code.
-
-### Configuration
-
-**File: `prompts/config.yaml`**
-```yaml
-prompts:
-  qa_cleaner: unified_qa_cleaner.txt
-  # Add more prompts as needed
-```
-
-### Prompt Files
-
-- **Location:** `prompts/` folder
-- **unified_qa_cleaner.txt** - Main prompt used for all QA validation and cleaning
-- **examples/** - Reference templates you can copy to customize
-
-### Customizing Prompts
-
-1. **Edit existing prompts:**
-   ```bash
-   # Edit the main validation prompt
-   nano prompts/unified_qa_cleaner.txt
-   ```
-
-2. **Use example templates:**
-   ```bash
-   # Copy an example and customize it
-   cp prompts/examples/hallucination_strict.txt prompts/hallucination_custom.txt
-   nano prompts/hallucination_custom.txt
-   
-   # Update config.yaml to use it
-   ```
-
-3. **Change prompt in code:**
-   ```python
-   validator = QAValidator(prompts_dir="prompts")
-   # Now uses prompts/config.yaml for prompt configuration
-   ```
-
-For details on prompt file structure, see [PROMPTS_STRUCTURE.txt](PROMPTS_STRUCTURE.txt)
 
 ## Performance
 
-First run:
-- Model loads into memory: ~5-30s
-- Processing per record: ~10-30s
-- Total for 100 records: 15-60 minutes (depends on hardware)
+Optimised for AMD Ryzen AI Max+ 395 / Radeon 8060S / 64 GB RAM, but benefits any modern machine.
 
-Subsequent runs:
-- Faster (model cached): ~5-15s per record
-- Total for 100 records: 8-30 minutes
+| Step | Time (250 records) |
+|------|--------------------|
+| Batch SSUN encoding (GPU) | ~5–15 s |
+| Parallel Ollama calls (`--workers 4`) | ~10–20 min |
+| **Total** | **~10–20 min** |
 
-**Machine with GPU:** 2-3x faster  
-**Machine with RAM:** Important (8GB minimum, 16GB+ recommended)
+Compared to the original sequential approach (~60–125 min for 250 records).
 
-## Example Output
-
-```csv
-soalan,jawapan_original,jawapan_cleaned,similarity_score,has_noise,is_too_short,has_mixed_language
-"Apa itu Python?","Python adalah bahasa programming yang mudah dipelajari","Python adalah bahasa pemrograman tingkat tinggi yang diinterpretasikan, diciptakan oleh Guido van Rossum, dengan sintaks yang sederhana dan mudah dibaca.",0.782,False,False,False
-```
+**Tips:**
+- Increase `--workers` and `OLLAMA_NUM_PARALLEL` together for more throughput
+- The Radeon 8060S uses unified memory, so Ollama can allocate more VRAM without a hard limit
 
 ## Troubleshooting
 
-**"Cannot connect to Ollama"**
-- Make sure `ollama serve` is running in another terminal
-- Check Ollama is on the right host/port
+**"Cannot connect to Ollama"**  
+→ Run `ollama serve` in a terminal, or check that Ollama is installed
 
-**"Model not found"**
-- Run: `ollama pull qwen2.5:27b`
-- Wait for download to complete
+**"Only one usage of each socket address"**  
+→ Ollama is already running — this is fine, just run the script
 
-**"Out of memory"**
-- Try smaller model: `ollama pull mistral:7b`
-- Close other applications
-- Add more RAM
+**"Model not found"**  
+→ Run `ollama pull qwen3:8b`
 
-**"Request timeout"**
-- Increase timeout (not configurable yet, modify source)
-- Use faster model
-- Wait for Ollama to finish previous requests
+**"Out of memory"**  
+→ Use a smaller model (`qwen3:4b`) or reduce `--workers`
 
-## Language Support
+**Slow processing**  
+→ Make sure `OLLAMA_NUM_PARALLEL` matches `--workers` before starting Ollama  
+→ Ensure the Radeon iGPU is being used by Ollama (check `ollama ps`)
 
-Current language-mix detection focuses on:
-- **Bahasa Malaysia (BM)**
-- **Indonesian**
+## Benefits of Local LLM
 
-The paraphrasing flow is now domain-agnostic (not technical-themed by default).  
-Language detection markers can be adjusted by editing `BM_MARKERS` and `INDONESIAN_MARKERS` in `qa_cleaner.py`.
-
+- No API keys or costs
+- Data stays on your machine
+- Works offline
+- Full control over the model and prompts

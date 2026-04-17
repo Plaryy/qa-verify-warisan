@@ -152,11 +152,11 @@ class QAValidator:
             # Normalised embeddings: dot product == cosine similarity
             sims = (ans_embs * chk_embs).sum(dim=1).cpu().numpy()
 
-            risks = []
+            scores = []
             for i, (ans, chk) in enumerate(zip(answers, chunks)):
                 factor = self._chunk_size_factor(len(chk.split()), len(ans.split()))
-                risks.append(1.0 - float(sims[i]) * factor)
-            return risks
+                scores.append(float(sims[i]) * factor)
+            return scores
 
         except Exception as e:
             print(f"[ERR]  Batch SSUN failed: {e}", file=sys.stderr)
@@ -363,7 +363,7 @@ class QAValidator:
         print(f"Records with noise:          {df['has_noise'].sum()} ({df['has_noise'].sum()/n*100:.1f}%)")
         print(f"Records too short:           {df['is_too_short'].sum()} ({df['is_too_short'].sum()/n*100:.1f}%)")
         print(f"Records with mixed language: {df['has_mixed_language'].sum()} ({df['has_mixed_language'].sum()/n*100:.1f}%)")
-        print(f"Avg hallucination risk:      {df['similarity_score'].mean():.3f}")
+        print(f"Avg grounding score:         {df['similarity_score'].mean():.3f}")
 
 
 # ---------------------------------------------------------------------------
